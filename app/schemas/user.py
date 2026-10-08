@@ -24,3 +24,8 @@ class UserResponse(BaseModel):
     email: EmailStr
     is_active: bool
     created_at: datetime
+
+
+class MessageResponse(BaseModel):
+    status: str
+    message: str

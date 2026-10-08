@@ -1,8 +1,10 @@
 from fastapi import HTTPException, status
 from psycopg2.extensions import connection
 from passlib.context import CryptContext
-from sqlalchemy.util import deprecated
 import bcrypt
+
+from fastapi.security import OAuth2PasswordRequestForm
+from app.core.security import create_access_token
 
 from app.schemas.user import UserCreate
 
@@ -68,3 +70,36 @@ def handle_register_user(user_data: UserCreate, conn: connection) -> dict:
         raise e
     finally:
         cursor.close()
+
+
+def handle_login_user(form_data: OAuth2PasswordRequestForm, conn: connection) -> dict:
+
+    cursor = conn.cursor()
+
+    try:
+        # 1. Query PostgreSQL for the user by email
+        select_user_query = "select id, email, hashed_password from users where email = %s"
+        cursor.execute(select_user_query, (form_data.username,))
+        user = cursor.fetchone()
+
+
+        # 2. Check if the user exists and the password is correct
+        if not user or not verify_password(form_data.password, user["hashed_password"]):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect email or password",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        # 3. Generate signed JWT access token containing user's UUID
+        access_token = create_access_token(data={"sub": str(user["id"])})
+
+        # 4. Return the token according to OAuth2 specification
+        return {"access_token": access_token}
+    finally:
+        cursor.close()
+
+
+def handle_get_me(current_user: dict) -> dict:
+    """Returns profile data for authenticated user."""
+    return current_user
