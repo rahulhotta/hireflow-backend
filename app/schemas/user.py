@@ -1,11 +1,10 @@
-from pydantic import BaseModel, EmailStr, field_validator
+from pydantic import BaseModel, EmailStr, field_validator, model_validator
 from uuid import UUID
 from datetime import datetime
 
 
-class UserCreate(BaseModel):
-    full_name: str
-    email: EmailStr
+
+class PasswordMixin(BaseModel):
     password: str
 
     @field_validator('password')
@@ -18,6 +17,11 @@ class UserCreate(BaseModel):
             raise ValueError('password must be at least 8 characters long')
         return v
 
+class UserCreate(PasswordMixin):
+    full_name: str
+    email: EmailStr
+
+
 class UserResponse(BaseModel):
     id: UUID
     full_name: str
@@ -29,3 +33,21 @@ class UserResponse(BaseModel):
 class MessageResponse(BaseModel):
     status: str
     message: str
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+class ResetPasswordRequest(PasswordMixin):
+    token: str
+
+class ChangePassword(PasswordMixin):
+    """Password (from PasswordMixin) is the new password"""
+    current_password: str
+
+    @model_validator(mode='after')
+    def password_must_differ(self):
+        if self.current_password == self.password:
+            raise ValueError("new password must be different from the current password")
+        return self
+

@@ -1,15 +1,21 @@
 from fastapi import HTTPException, status
+from datetime import datetime, timedelta, timezone
 from psycopg2.extensions import connection
-from passlib.context import CryptContext
 import bcrypt
 
 from fastapi.security import OAuth2PasswordRequestForm
-from app.core.security import create_access_token
+from app.core.security import (
+    create_access_token,
+    generate_reset_token,
+    hash_reset_token,
+    RESET_TOKEN_EXPIRE_MINUTES,
+)
+from app.core.mailer import send_password_reset_email
+from app.schemas.user import UserCreate, ForgotPasswordRequest, ResetPasswordRequest
 
-from app.schemas.user import UserCreate
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
+user_table = "users"
+password_reset_token_table = "password_reset_tokens"
 
 def hash_password(password: str) -> str:
     pwd_bytes = password.encode('utf-8')
@@ -88,7 +94,6 @@ def handle_login_user(form_data: OAuth2PasswordRequestForm, conn: connection) ->
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Incorrect email or password",
-                headers={"WWW-Authenticate": "Bearer"},
             )
 
         # 3. Generate signed JWT access token containing user's UUID
@@ -103,3 +108,106 @@ def handle_login_user(form_data: OAuth2PasswordRequestForm, conn: connection) ->
 def handle_get_me(current_user: dict) -> dict:
     """Returns profile data for authenticated user."""
     return current_user
+
+
+def handle_forgot_password(payload: ForgotPasswordRequest, conn: connection) -> dict:
+    """
+    Issues a single-use password reset token and emails the link.
+
+    Always returns the same generic response,whether or not the email
+    exists, to prevent user enumeration.
+    """
+
+    generic_response = {
+        "status": "success",
+        "message": "If an account with that email exists, a reset link has been sent.",
+    }
+
+    cursor = conn.cursor()
+    raw_token = None
+
+    try:
+        select_query = f"SELECT id, email FROM {user_table} WHERE email =%s;"
+        cursor.execute(select_query, (payload.email,))
+
+        user = cursor.fetchone()
+
+        if user is None:
+            return generic_response
+
+        # Invalidate any outstanding tokens for this user.
+        update_query = f"""
+        UPDATE {password_reset_token_table} SET used = TRUE 
+        WHERE user_id = %s AND used = FALSE;
+        """
+        cursor.execute(update_query, (user['id'],))
+        raw_token = generate_reset_token()
+        token_hash = hash_reset_token(raw_token)
+        expires_at = datetime.now(timezone.utc) + timedelta(
+            minutes=RESET_TOKEN_EXPIRE_MINUTES
+        )
+
+        insert_reset_token_query = f"""
+        INSERT INTO {password_reset_token_table} (user_id, token_hash, expires_at)
+        VALUES (%s, %s, %s);
+        """
+        cursor.execute(insert_reset_token_query, (user["id"], token_hash, expires_at))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cursor.close()
+
+    if raw_token:
+        send_password_reset_email(to_email=str(payload.email), raw_token=raw_token)
+    return generic_response
+
+def handle_reset_password(payload: ResetPasswordRequest, conn: connection) -> dict:
+    """
+    Consumes a single-use reset token and sets the new password.
+
+    The token row and the user row are updated in ONE transaction so a
+    token can never survive a successful password change.
+    """
+    invalid_token_exception = HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="Invalid or expired reset token.",
+    )
+
+    token_hash = hash_reset_token(payload.token)
+    cursor = conn.cursor()
+    try:
+        select_token_query = f"""
+        SELECT id, user_id FROM {password_reset_token_table}       
+        WHERE token_hash = %s AND used = FALSE AND expires_at > NOW(); 
+        """
+        cursor.execute(select_token_query, (token_hash,))
+        token_row = cursor.fetchone()
+
+        if token_row is None:
+            raise invalid_token_exception
+
+        new_hashed_password = hash_password(payload.password)
+
+        update_user_query = f"""
+        UPDATE {user_table} SET hashed_password = %s WHERE id = %s;
+        """
+        cursor.execute(update_user_query, (new_hashed_password, token_row["user_id"]))
+
+        burn_token_query = f"""
+        UPDATE {password_reset_token_table} SET used = TRUE WHERE id = %s;
+        """
+        cursor.execute(burn_token_query, (token_row["id"],))
+
+        conn.commit()
+
+        return {
+            "status": "success",
+            "message": "Password has been reset successfully.",
+        }
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cursor.close()

@@ -1,16 +1,27 @@
-from datetime import  datetime, timedelta
+from datetime import  datetime, timedelta, timezone
 import jwt
-from passlib.context import CryptContext
+import secrets
+import hashlib
 from fastapi import Depends, HTTPException, status, Request
 from app.database import get_db_connection
 from psycopg2.extensions import connection
+from app.config import settings
 
-SECRET_KEY = "YOUR_SUPER_SECRET_KEY_CHANGE_IN_PRODUCTION"
+SECRET_KEY = settings.SECRET_KEY
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # Token valid for 24 hours
+RESET_TOKEN_EXPIRE_MINUTES = 30
 COOKIE_NAME = "access_token"
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+
+def generate_reset_token() -> str:
+    """Creates the raw token that gets emailed to the user."""
+    return secrets.token_urlsafe(32)
+
+def hash_reset_token(token: str) -> str:
+    """Hashes a reset token for safe storage/lookup in the DB."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 def get_token_from_cookie(request: Request) -> str:
     token = request.cookies.get(COOKIE_NAME)
@@ -65,7 +76,7 @@ def create_access_token(data: dict) -> str:
     """
 
     to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode.update({"exp": expire})
 
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
